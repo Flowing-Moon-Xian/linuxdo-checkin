@@ -129,27 +129,62 @@ class LinuxDoBrowser:
 
         logger.info(f"成功解析 {len(dp_cookies)} 个 Cookie 条目")
 
-        # 同步到 requests.Session，以便后续 API 请求（如 print_connect_info）使用
+        # 同步到 requests.Session
         for ck in dp_cookies:
             self.session.cookies.set(ck["name"], ck["value"], domain="linux.do")
+            self.session.cookies.set(ck["name"], ck["value"], domain=".linux.do")
 
-        # 同步到 DrissionPage
-        self.page.set.cookies(dp_cookies)
+        # 同步到 DrissionPage，确保双域名覆盖
+        final_cookies = []
+        for ck in dp_cookies:
+            # 原有的域
+            final_cookies.append(ck)
+            # 补齐另一种域格式
+            alt_domain = ".linux.do" if ck["domain"] == "linux.do" else "linux.do"
+            new_ck = ck.copy()
+            new_ck["domain"] = alt_domain
+            final_cookies.append(new_ck)
+        
+        self.page.set.cookies(final_cookies)
         logger.info("Cookie 设置完成，导航至 linux.do...")
         self.page.get(HOME_URL)
+        
+        # 初始等待
         time.sleep(5)
+
+        # 检查是否遇到 Cloudflare 验证
+        if "cloudflare" in self.page.html.lower() or "challenge-running" in self.page.html:
+            logger.warning("检测到 Cloudflare 验证界面，等待自动通过 (15s)...")
+            time.sleep(15)
+            # 再次尝试点击也许能触发某些机制
+            if "挑战" in self.page.html or "Verify you are human" in self.page.html:
+                logger.info("尝试模拟点击验证复选框...")
+                try:
+                    self.page.ele(".:ctp-checkbox-label", timeout=5).click()
+                    time.sleep(5)
+                except:
+                    pass
 
         # 验证登录状态
         try:
-            user_ele = self.page.ele("@id=current-user")
+            # 增加超时重试
+            user_ele = None
+            for i in range(3):
+                user_ele = self.page.ele("@id=current-user", timeout=5)
+                if user_ele:
+                    break
+                if "avatar" in self.page.html:
+                    logger.info("Cookie 登录验证成功 (通过 avatar)")
+                    return True
+                if i < 2:
+                    logger.info(f"等待登录状态渲染 ({i+1}/3)...")
+                    time.sleep(3)
         except Exception as e:
             logger.warning(f"Cookie 登录验证异常: {str(e)}")
             return True
+
         if not user_ele:
-            if "avatar" in self.page.html:
-                logger.info("Cookie 登录验证成功 (通过 avatar)")
-                return True
-            logger.error("Cookie 登录验证失败 (未找到 current-user)，Cookie 可能已过期")
+            logger.error("Cookie 登录验证失败 (未找到 current-user)，可能被 Cloudflare 拦截或 Cookie 已过期")
             return False
         else:
             logger.info("Cookie 登录验证成功")
@@ -211,12 +246,22 @@ class LinuxDoBrowser:
             return False
 
         # Step 3: Pass cookies to DrissionPage
-        logger.info("同步 Cookie 到 DrissionPage...")
+        logger.info("同步 Cookie 到 DrissionPage (双域名覆盖)...")
 
         cookies_dict = self.session.cookies.get_dict()
 
         dp_cookies = []
         for name, value in cookies_dict.items():
+            # 写入 linux.do
+            dp_cookies.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": "linux.do",
+                    "path": "/",
+                }
+            )
+            # 写入 .linux.do
             dp_cookies.append(
                 {
                     "name": name,
